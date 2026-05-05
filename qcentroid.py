@@ -1,5 +1,3 @@
-hello from claude
-line 2
 """
 QCentroid solver — Classical MILP for resource allocation across maintenance depots.
 
