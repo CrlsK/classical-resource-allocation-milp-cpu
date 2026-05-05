@@ -265,25 +265,46 @@ def run(input_data: dict, solver_params: dict, extra_arguments: dict) -> dict:
         f"assigned={len(assignments)}/{len(tasks)}, on_time={on_time}/{len(tasks)}"
     )
 
+    cost_breakdown = {
+        "labor_cost_eur": round(labor_total, 4),
+        "travel_cost_eur": round(travel_total, 4),
+        "sla_penalty_eur": round(sla_total, 4),
+        "unassigned_penalty_eur": round(unassigned_pen, 4),
+        "total_cost_eur": round(float(objective), 4),
+    }
+    kpis = {
+        "tasks_total": len(tasks),
+        "tasks_assigned": len(assignments),
+        "sla_on_time_rate": round(on_time / max(1, len(tasks)), 4),
+        "technician_utilization": round(util, 4),
+        "stockouts": 0,
+    }
+
+    # Talgo-friendly additional output (per-depot KPIs, Gantt, SLA risk, BOM)
+    try:
+        from talgo_outputs import build_additional  # noqa: WPS433
+        additional_output = build_additional(
+            algorithm="MILP_CBC",
+            objective_value=round(float(objective), 4),
+            solution_status=status,
+            cost_breakdown=cost_breakdown,
+            kpis=kpis,
+            assignments=assignments,
+            unassigned_tasks=unassigned,
+            depots=depots, technicians=techs, tasks=tasks, spare_parts=spares,
+            extras={"travel_cost_per_km_eur": travel_cost_km},
+        )
+    except Exception as e:  # pragma: no cover
+        logger.warning(f"build_additional failed: {e}")
+        additional_output = {"error": str(e)}
+
     return {
         "objective_value": round(float(objective), 4),
         "solution_status": status,
         "assignments": assignments,
         "unassigned_tasks": unassigned,
-        "cost_breakdown": {
-            "labor_cost_eur": round(labor_total, 4),
-            "travel_cost_eur": round(travel_total, 4),
-            "sla_penalty_eur": round(sla_total, 4),
-            "unassigned_penalty_eur": round(unassigned_pen, 4),
-            "total_cost_eur": round(float(objective), 4),
-        },
-        "kpis": {
-            "tasks_total": len(tasks),
-            "tasks_assigned": len(assignments),
-            "sla_on_time_rate": round(on_time / max(1, len(tasks)), 4),
-            "technician_utilization": round(util, 4),
-            "stockouts": 0,
-        },
+        "cost_breakdown": cost_breakdown,
+        "kpis": kpis,
         "computation_metrics": {
             "wall_time_s": elapsed,
             "algorithm": "MILP_CBC",
@@ -293,6 +314,7 @@ def run(input_data: dict, solver_params: dict, extra_arguments: dict) -> dict:
             "best_iter": 0,
             "energy_curve": [],
         },
+        "additional_output": additional_output,
         "benchmark": {
             "execution_cost": {"value": 1.0, "unit": "credits"},
             "time_elapsed": f"{elapsed}s",
