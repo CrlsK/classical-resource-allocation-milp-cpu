@@ -298,8 +298,13 @@ def run(input_data: dict, solver_params: dict, extra_arguments: dict) -> dict:
         logger.warning(f"build_additional failed: {e}")
         additional_output = {"error": str(e)}
 
+    headline = additional_output.get("headline_numerics", {}) if isinstance(additional_output, dict) else {}
     return {
         "objective_value": round(float(objective), 4),
+        "sla_on_time_rate": kpis["sla_on_time_rate"],
+        "technician_utilization": kpis["technician_utilization"],
+        "total_travel_km": float(headline.get("total_travel_km", 0.0)),
+        "replenishment_alerts_count": int(headline.get("replenishment_alerts_count", 0)),
         "solution_status": status,
         "assignments": assignments,
         "unassigned_tasks": unassigned,
