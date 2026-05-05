@@ -18,7 +18,7 @@ import hashlib as _hashlib
 import json as _json
 from typing import Any, Dict, List
 
-SOLVER_VERSION = "v5.0.0"
+SOLVER_VERSION = "v6.0.0"
 
 
 def _amber_red_green(slack_h: float, priority: int = 3) -> str:
