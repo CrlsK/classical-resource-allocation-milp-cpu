@@ -4,15 +4,29 @@ planners want to see in the QCentroid additional-output viewer.
 
 Both the classical and the quantum-inspired solver call `build_additional`
 with the same arguments so the viewer is identical across solvers.
+
+Personas served (see /reports/talgo-team-personas.md):
+- Mar Aldecoa (Director MRO Operations) → executive_summary
+- Iván Pérez   (Lead Operations Planner) → shift_handover, sla_risk, gantt
+- Sara Estévez (Data Lead)               → input_audit
+- Lucas Romero (Quantum/Opt Lead)        → convergence_diagnostics
+- Patricia Vega (Compliance)             → compliance
 """
 from __future__ import annotations
+import datetime as _dt
+import hashlib as _hashlib
+import json as _json
 from typing import Any, Dict, List
 
+SOLVER_VERSION = "v3.0.0"
 
-def _amber_red_green(slack_h: float) -> str:
+
+def _amber_red_green(slack_h: float, priority: int = 3) -> str:
+    # Higher-priority tasks get a tighter buffer
+    buf = max(0.5, 2.0 - 0.3 * priority)
     if slack_h < 0:
         return "red"
-    if slack_h < 1.0:
+    if slack_h < buf:
         return "amber"
     return "green"
 
@@ -82,7 +96,7 @@ def build_additional(
         row["travel_eur"] = round(row["travel_eur"], 2)
         row["tech_hours_used"] = round(row["tech_hours_used"], 2)
 
-    # ---- SLA risk per task ---------------------------------------------------
+    # ---- SLA risk per task (priority-weighted buffer) ------------------------
     sla_risk: List[Dict[str, Any]] = []
     on_time = 0
     for a in assignments:
@@ -90,6 +104,7 @@ def build_additional(
         deadline = float(t.get("deadline_hours", 24))
         eta = float(a["end_hour"])  # technician-relative; first-task ETA is its end_hour
         slack = round(deadline - eta, 2)
+        prio = int(t.get("priority", 3))
         if slack >= 0:
             on_time += 1
         sla_risk.append({
@@ -98,10 +113,10 @@ def build_additional(
             "deadline_hours": deadline,
             "eta_hours": round(eta, 2),
             "slack_hours": slack,
-            "status": _amber_red_green(slack),
-            "priority": int(t.get("priority", 3)),
+            "status": _amber_red_green(slack, prio),
+            "priority": prio,
         })
-    sla_risk.sort(key=lambda r: r["slack_hours"])
+    sla_risk.sort(key=lambda r: (r["status"] != "red", r["status"] != "amber", -r["priority"], r["slack_hours"]))
 
     # ---- Gantt rows (one per assignment) ------------------------------------
     gantt = [
@@ -168,8 +183,143 @@ def build_additional(
     )
     summary = " ".join(s for s in [line1, line2, line3] if s)
 
+    # ---- Persona blocks -----------------------------------------------------
+    # Mar (Director MRO) — three numbers + a sentence she can read out
+    busiest_name = busiest['depot_name'] if busiest else None
+    busiest_pct = busiest['utilisation_pct'] if busiest else 0
+    bottom_line = (
+        f"Plan accepts {len(assignments)}/{len(tasks)} tasks at "
+        f"€{objective_value:,.0f}, {on_time/max(1,len(tasks))*100:.0f}% on-time, "
+        f"busiest depot {busiest_name} at {busiest_pct:.0f}%."
+    )
+    executive_summary = {
+        "bottom_line": bottom_line,
+        "headline_kpis": {
+            "tasks_assigned_pct": round(100.0 * len(assignments) / max(1, len(tasks)), 1),
+            "sla_on_time_pct": round(100.0 * on_time / max(1, len(tasks)), 1),
+            "total_cost_eur": float(objective_value),
+            "busiest_depot": busiest_name,
+            "busiest_depot_utilisation_pct": float(busiest_pct),
+        },
+    }
+
+    # Iván (Planner) — printable per-depot shift-handover sheets
+    shift_handover: Dict[str, Any] = {}
+    for d in depots:
+        d_id = d["id"]
+        techs_in_depot = [t for t in technicians if t.get("depot_id") == d_id]
+        d_assigns = [a for a in assignments if a["depot_id"] == d_id]
+        d_assigns.sort(key=lambda a: (a["technician_id"], a["start_hour"]))
+        # Lines per technician
+        per_tech: Dict[str, List[Dict[str, Any]]] = {}
+        for r in techs_in_depot:
+            per_tech[r["id"]] = []
+        for a in d_assigns:
+            t = task_by_id.get(a["task_id"], {})
+            per_tech.setdefault(a["technician_id"], []).append({
+                "task_id": a["task_id"],
+                "site_id": t.get("site_id"),
+                "start_hour": a["start_hour"],
+                "end_hour": a["end_hour"],
+                "priority": int(t.get("priority", 3)),
+                "parts_needed": [{"part_id": p["part_id"], "qty": p["qty"]} for p in (a.get("parts_allocated") or [])],
+            })
+        shift_handover[d_id] = {
+            "depot_name": d.get("name", d_id),
+            "headcount": len(techs_in_depot),
+            "tasks_today": len(d_assigns),
+            "per_technician": per_tech,
+            "parts_pick_list": per_depot[d_id]["parts_used"],
+        }
+
+    # Sara (Data) — input audit
+    cert_warnings = [
+        {"technician_id": r["id"], "issue": "no certifications on file"}
+        for r in technicians if not r.get("certifications")
+    ]
+    zero_stock = [
+        {"part_id": s["part_id"], "depot_id": s["depot_id"]}
+        for s in spare_parts if int(s.get("stock", 0)) == 0
+    ]
+    input_audit = {
+        "n_depots": len(depots),
+        "n_technicians": len(technicians),
+        "n_tasks": len(tasks),
+        "n_parts_records": len(spare_parts),
+        "n_compatible_pairs": sum(
+            1 for t in tasks for r in technicians
+            if t.get("required_skill") in set(r.get("skills", []))
+            and set(t.get("required_certifications", []) or []).issubset(set(r.get("certifications", []) or []))
+        ),
+        "anomalies": {
+            "techs_without_certifications": cert_warnings,
+            "zero_stock_records": zero_stock,
+        },
+    }
+
+    # Lucas (Quantum) — convergence diagnostics (only meaningful for QUBO solver)
+    energy_curve = (extras or {}).get("energy_curve") or []
+    convergence_diagnostics = {
+        "n_outer_iterations": len(energy_curve),
+        "best_iteration": (extras or {}).get("best_iter"),
+        "monotone_decreasing_best": all(
+            energy_curve[i] >= energy_curve[i + 1] for i in range(len(energy_curve) - 1)
+        ) if energy_curve else None,
+        "first_energy": energy_curve[0] if energy_curve else None,
+        "best_energy": min(energy_curve) if energy_curve else None,
+        "feasibility_breakdown": (extras or {}).get("feasibility_breakdown"),
+        "qubo_size": (extras or {}).get("qubo_size"),
+        "penalty_weights": (extras or {}).get("penalty_weights"),
+    }
+
+    # Patricia (Compliance) — audit fields
+    dataset_payload = {
+        "depots": depots, "technicians": technicians, "tasks": tasks,
+        "spare_parts": spare_parts,
+    }
+    dataset_sha = _hashlib.sha256(_json.dumps(dataset_payload, sort_keys=True, default=str).encode()).hexdigest()
+    used_certs = sorted({c for a in assignments for r in technicians
+                         if r["id"] == a["technician_id"]
+                         for c in (r.get("certifications") or [])})
+    over_cap = []
+    cap_by_tech = {r["id"]: float(r.get("available_hours", 8.0)) +
+                   float(depot_by_id.get(r["depot_id"], {}).get("max_overtime_hours", 2.0))
+                   for r in technicians}
+    used_h_by_tech = {}
+    for a in assignments:
+        used_h_by_tech[a["technician_id"]] = used_h_by_tech.get(a["technician_id"], 0) + (a["end_hour"] - a["start_hour"])
+    for tid, h in used_h_by_tech.items():
+        if h > cap_by_tech.get(tid, 10) + 1e-6:
+            over_cap.append({"technician_id": tid, "used_hours": h, "capacity_hours": cap_by_tech.get(tid)})
+    compliance = {
+        "solver_version": SOLVER_VERSION,
+        "algorithm": algorithm,
+        "run_started_at_utc": _dt.datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "dataset_sha256": dataset_sha,
+        "all_required_certifications_present": all(
+            set(task_by_id[a["task_id"]].get("required_certifications", []) or []).issubset(
+                {c for r in technicians if r["id"] == a["technician_id"] for c in r.get("certifications", []) or []}
+            )
+            for a in assignments
+        ),
+        "technician_overtime_violations": over_cap,
+        "certifications_used": used_certs,
+    }
+
+    # Headline numerics surfaced both inside additional_output and copied to top-level by caller
+    headline = {
+        "objective_eur": float(objective_value),
+        "sla_on_time_pct": round(100.0 * on_time / max(1, len(tasks)), 2),
+        "tasks_assigned_pct": round(100.0 * len(assignments) / max(1, len(tasks)), 2),
+        "technician_utilization_pct": round(100.0 * float(kpis.get("technician_utilization", 0)), 2),
+        "total_travel_km": round(sum(float(a.get("travel_km", 0)) for a in assignments), 2),
+        "replenishment_alerts_count": len(replen_alerts),
+    }
+
     out = {
         "summary": summary,
+        "executive_summary": executive_summary,
+        "headline_numerics": headline,
         "cost_components": {
             "labor_eur": float(cost_breakdown.get("labor_cost_eur", 0)),
             "travel_eur": float(cost_breakdown.get("travel_cost_eur", 0)),
@@ -177,10 +327,14 @@ def build_additional(
             "unassigned_penalty_eur": float(cost_breakdown.get("unassigned_penalty_eur", 0)),
         },
         "per_depot_kpis": per_depot,
+        "shift_handover": shift_handover,
         "gantt": gantt,
         "sla_risk": sla_risk,
         "parts_bom": parts_bom,
         "replenishment_alerts": replen_alerts,
+        "input_audit": input_audit,
+        "convergence_diagnostics": convergence_diagnostics,
+        "compliance": compliance,
         "kpis": kpis,
         "solution_status": solution_status,
     }
