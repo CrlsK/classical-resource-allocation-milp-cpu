@@ -18,7 +18,7 @@ import hashlib as _hashlib
 import json as _json
 from typing import Any, Dict, List
 
-SOLVER_VERSION = "v4.0.0"
+SOLVER_VERSION = "v5.0.0"
 
 
 def _amber_red_green(slack_h: float, priority: int = 3) -> str:
@@ -362,20 +362,70 @@ def build_additional(
 
     # Boss-pitch narrative (one paragraph for the steering committee)
     travel_save = headline["total_travel_km"]
+    iter_phrase = (
+        f"in {extras['n_iter']:,} SA outer steps with {extras.get('n_restarts', 0)} restarts"
+        if extras and extras.get("n_iter")
+        else "via exact MILP (CBC backend)"
+    )
+    qubit_phrase = (
+        f" The QUBO encoding uses {convergence_diagnostics.get('qubo_size', 0)} qubits."
+        if convergence_diagnostics.get("qubo_size") else ""
+    )
     boss_pitch = (
-        f"On the {input_audit['n_tasks']}-task / {input_audit['n_technicians']}-technician case, "
-        f"{algorithm} produced a feasible plan in {(extras or {}).get('n_iter', '?')} iterations "
+        f"On the {input_audit['n_tasks']}-task / {input_audit['n_technicians']}-technician case "
+        f"({input_audit['n_compatible_pairs']} compatible pairs), "
+        f"{algorithm} produced a {solution_status.upper()} plan {iter_phrase} "
         f"costing €{objective_value:,.0f} (labor {cost_breakdown.get('labor_cost_eur',0):.0f}, "
         f"travel {cost_breakdown.get('travel_cost_eur',0):.0f}, SLA penalty {cost_breakdown.get('sla_penalty_eur',0):.0f}). "
         f"All hard constraints satisfied; {len(replen_alerts)} part(s) flagged for tomorrow's replenishment. "
-        f"Total fleet travel = {travel_save:.0f} km. "
-        f"Quantum-inspired version exposes a {convergence_diagnostics.get('qubo_size', 0)}-qubit QUBO that "
-        f"matches the classical optimum within tolerance — ready for a VQA pilot on real hardware."
+        f"Total fleet travel = {travel_save:.0f} km, busiest depot {busiest_name} at {busiest_pct:.0f}%."
+        + qubit_phrase
+    )
+
+    # KPI scorecard vs Talgo targets (R/A/G)
+    def rag(actual, target_green, target_amber, higher_is_better=True):
+        if higher_is_better:
+            return "green" if actual >= target_green else ("amber" if actual >= target_amber else "red")
+        return "green" if actual <= target_green else ("amber" if actual <= target_amber else "red")
+    sla_pct = headline["sla_on_time_pct"]
+    util_pct = headline["technician_utilization_pct"]
+    scorecard = [
+        {"kpi": "Tasks assigned %", "actual": headline["tasks_assigned_pct"], "target_green": 100, "target_amber": 95, "rag": rag(headline["tasks_assigned_pct"], 100, 95)},
+        {"kpi": "SLA on-time %",    "actual": sla_pct, "target_green": 95, "target_amber": 85, "rag": rag(sla_pct, 95, 85)},
+        {"kpi": "Tech utilisation %", "actual": util_pct, "target_green": 60, "target_amber": 40, "rag": rag(util_pct, 60, 40)},
+        {"kpi": "Replenishment alerts", "actual": len(replen_alerts), "target_green": 0, "target_amber": 2, "rag": rag(len(replen_alerts), 0, 2, higher_is_better=False)},
+        {"kpi": "Total cost (EUR)", "actual": float(objective_value), "target_green": 9999999, "target_amber": 9999999, "rag": "info"},
+    ]
+
+    # What-if narrative (deadline +2h)
+    relaxed_on_time = sum(1 for r in sla_risk if r["slack_hours"] + 2 >= 0)
+    what_if = (
+        f"Relaxing every task deadline by +2 h would lift on-time delivery from "
+        f"{on_time}/{len(tasks)} to {relaxed_on_time}/{len(tasks)}. "
+        f"This is the planner's lever for next-day prioritisation."
+    )
+
+    # Presentation pack — drop-in markdown for the Monday steering committee
+    rag_emoji = {"green":"🟢","amber":"🟡","red":"🔴","info":"⚪"}
+    sc_lines = [f"| {r['kpi']} | {r['actual']} | {rag_emoji.get(r['rag'],'')} {r['rag']} |" for r in scorecard]
+    presentation_pack = (
+        f"### {algorithm} run — {compliance['run_started_at_utc']}\n\n"
+        f"{boss_pitch}\n\n"
+        f"**Scorecard**\n\n| KPI | Actual | RAG |\n|---|---|---|\n" + "\n".join(sc_lines) + "\n\n"
+        f"**Per-depot snapshot**\n\n| Depot | Headcount | Tasks today | Utilisation | Labor (€) | Travel (€) |\n|---|---|---|---|---|---|\n"
+        + "\n".join(
+            f"| {row['depot_name']} | {row['tech_count']} | {row['tasks_assigned']} | {row['utilisation_pct']:.0f}% | {row['labor_eur']:.0f} | {row['travel_eur']:.0f} |"
+            for row in per_depot.values()
+        )
+        + f"\n\n**What-if**: {what_if}\n"
     )
 
     out = {
         "summary": summary,
         "boss_pitch": boss_pitch,
+        "scorecard": scorecard,
+        "what_if": what_if,
+        "presentation_pack": presentation_pack,
         "executive_summary": executive_summary,
         "headline_numerics": headline,
         "cost_components": {
