@@ -300,30 +300,39 @@ def run(input_data: dict, solver_params: dict, extra_arguments: dict) -> dict:
 
     headline = additional_output.get("headline_numerics", {}) if isinstance(additional_output, dict) else {}
 
-    # Emit additional-output FILES (HTML dashboard + JSON snapshot + presentation + Talgo visuals)
+    # Emit additional-output FILES — every artefact as .html or .json so the
+    # platform's webview previews them inline (preview only renders those types).
     try:
         from talgo_dashboard import render_dashboard  # noqa: WPS433
         from talgo_files import emit_files  # noqa: WPS433
         from talgo_visuals import (
-            spain_depot_map_svg, cost_waterfall_svg, skill_coverage_heatmap_svg
+            spain_depot_map_svg, cost_waterfall_svg, skill_coverage_heatmap_svg,
+            wrap_svg_in_html, markdown_to_html,
         )  # noqa: WPS433
         files = [
             {"name": "00_executive_summary.json",
              "content": additional_output.get("executive_summary", {})},
             {"name": "01_talgo_dashboard.html",
              "content": render_dashboard("MILP_CBC", additional_output, float(objective))},
-            {"name": "02_presentation_pack.md",
-             "content": additional_output.get("presentation_pack", "")},
+            {"name": "02_presentation_pack.html",
+             "content": markdown_to_html("Presentation pack — MILP_CBC",
+                                         additional_output.get("presentation_pack", ""))},
             {"name": "03_shift_handover.json",
              "content": additional_output.get("shift_handover", {})},
             {"name": "04_compliance.json",
              "content": additional_output.get("compliance", {})},
-            {"name": "06_spain_depot_map.svg",
-             "content": spain_depot_map_svg(depots, tasks, assignments)},
-            {"name": "07_cost_waterfall.svg",
-             "content": cost_waterfall_svg(cost_breakdown)},
-            {"name": "08_skill_coverage_heatmap.svg",
-             "content": skill_coverage_heatmap_svg(depots, techs)},
+            {"name": "06_spain_depot_map.html",
+             "content": wrap_svg_in_html("Spain depot map — assignments",
+                                         spain_depot_map_svg(depots, tasks, assignments),
+                                         "Blue circles = depots, dots = task sites (red = critical), dashed lines = depot→task assignments.")},
+            {"name": "07_cost_waterfall.html",
+             "content": wrap_svg_in_html("Cost waterfall — €",
+                                         cost_waterfall_svg(cost_breakdown),
+                                         "Labor + Travel + SLA penalties + Unassigned-task penalty = TOTAL.")},
+            {"name": "08_skill_coverage_heatmap.html",
+             "content": wrap_svg_in_html("Skill coverage per depot",
+                                         skill_coverage_heatmap_svg(depots, techs),
+                                         "Cells show technician headcount per (depot, skill).")},
         ]
         additional_output["uploaded_files"] = emit_files(files)
     except Exception as _e:  # pragma: no cover
