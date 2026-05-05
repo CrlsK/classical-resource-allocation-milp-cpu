@@ -299,6 +299,32 @@ def run(input_data: dict, solver_params: dict, extra_arguments: dict) -> dict:
         additional_output = {"error": str(e)}
 
     headline = additional_output.get("headline_numerics", {}) if isinstance(additional_output, dict) else {}
+
+    # Emit additional-output FILES (HTML dashboard + JSON snapshot + presentation pack md)
+    try:
+        from talgo_dashboard import render_dashboard  # noqa: WPS433
+        from talgo_files import emit_files  # noqa: WPS433
+        files = [
+            {"name": "00_executive_summary.json",
+             "content": additional_output.get("executive_summary", {}),
+             "content_type": "application/json"},
+            {"name": "01_talgo_dashboard.html",
+             "content": render_dashboard("MILP_CBC", additional_output, float(objective)),
+             "content_type": "text/html"},
+            {"name": "02_presentation_pack.md",
+             "content": additional_output.get("presentation_pack", ""),
+             "content_type": "text/markdown"},
+            {"name": "03_shift_handover.json",
+             "content": additional_output.get("shift_handover", {}),
+             "content_type": "application/json"},
+            {"name": "04_compliance.json",
+             "content": additional_output.get("compliance", {}),
+             "content_type": "application/json"},
+        ]
+        additional_output["uploaded_files"] = emit_files(files)
+    except Exception as _e:  # pragma: no cover
+        logger.warning(f"emit_files failed: {_e}")
+
     return {
         "objective_value": round(float(objective), 4),
         "sla_on_time_rate": kpis["sla_on_time_rate"],
