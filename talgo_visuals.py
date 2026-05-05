@@ -7,6 +7,11 @@ Visualisations included:
                                      and arrows from each depot to the tasks it serves.
 - cost_waterfall_svg(cost_breakdown) — labor + travel + SLA penalty + unassigned waterfall.
 - skill_coverage_heatmap_svg(...)  — depot × skill heatmap (cells = number of techs).
+- wrap_svg_in_html(title, svg)    — wraps an SVG into a self-contained HTML page so the
+                                     QCentroid additional-output viewer can preview it
+                                     inline (the viewer only previews .html and .json).
+- markdown_to_html(title, md)     — minimal in-place markdown → HTML conversion (no deps)
+                                     so the presentation-pack file is also previewable.
 """
 from __future__ import annotations
 import html as _html
@@ -175,3 +180,94 @@ def skill_coverage_heatmap_svg(depots: List[Dict[str, Any]], technicians: List[D
         + "".join(rows)
         + '</svg>'
     )
+
+
+# --- Wrappers so platform webview previews the artefacts -------------------
+def wrap_svg_in_html(title: str, svg: str, subtitle: str = "") -> str:
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{_e(title)}</title>
+<style>body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:18px;background:#f8fafc;color:#0f172a;}}
+h1{{font-size:18px;margin:0 0 4px;}} p{{color:#64748b;font-size:12px;margin:0 0 12px;}}
+.frame{{background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:12px;}}</style></head>
+<body><h1>{_e(title)}</h1>{('<p>' + _e(subtitle) + '</p>') if subtitle else ''}<div class="frame">{svg}</div></body></html>"""
+
+
+def markdown_to_html(title: str, md: str) -> str:
+    """Tiny markdown → HTML converter for the presentation pack file.
+
+    Supports: # / ## / ### headings, **bold**, *italic*, paragraphs, tables (pipe-style),
+    fenced code blocks, simple lists. Good enough for the artefact we generate."""
+    lines = md.splitlines()
+    out = []
+    in_table = False
+    table_buf: list = []
+    in_list = False
+
+    def flush_table():
+        nonlocal table_buf
+        if not table_buf:
+            return
+        rows = [r for r in table_buf if r.strip().startswith("|") and not set(r.strip().strip("|").strip()) <= set("-: ")]
+        if not rows:
+            table_buf = []
+            return
+        head = [c.strip() for c in rows[0].strip().strip("|").split("|")]
+        body = []
+        for r in rows[1:]:
+            body.append([c.strip() for c in r.strip().strip("|").split("|")])
+        out.append("<table><thead><tr>" + "".join(f"<th>{_e(c)}</th>" for c in head) + "</tr></thead><tbody>"
+                   + "".join("<tr>" + "".join(f"<td>{_e(c)}</td>" for c in r) + "</tr>" for r in body)
+                   + "</tbody></table>")
+        table_buf = []
+
+    def fmt_inline(s: str) -> str:
+        s = _e(s)
+        # bold + italic (very simple)
+        import re as _re
+        s = _re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        s = _re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*", r"<em>\1</em>", s)
+        s = _re.sub(r"`([^`]+)`", r"<code>\1</code>", s)
+        return s
+
+    for raw in lines:
+        line = raw.rstrip()
+        if line.startswith("|"):
+            in_table = True
+            table_buf.append(line)
+            continue
+        if in_table:
+            in_table = False
+            flush_table()
+        if line.startswith("### "):
+            out.append(f"<h3>{fmt_inline(line[4:])}</h3>")
+        elif line.startswith("## "):
+            out.append(f"<h2>{fmt_inline(line[3:])}</h2>")
+        elif line.startswith("# "):
+            out.append(f"<h1>{fmt_inline(line[2:])}</h1>")
+        elif line.startswith("- "):
+            if not in_list:
+                out.append("<ul>"); in_list = True
+            out.append(f"<li>{fmt_inline(line[2:])}</li>")
+        elif line.strip() == "":
+            if in_list:
+                out.append("</ul>"); in_list = False
+            out.append("")
+        else:
+            if in_list:
+                out.append("</ul>"); in_list = False
+            out.append(f"<p>{fmt_inline(line)}</p>")
+    if in_list:
+        out.append("</ul>")
+    if in_table:
+        flush_table()
+
+    body = "\n".join(out)
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><title>{_e(title)}</title>
+<style>body{{font-family:-apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:24px;background:#f8fafc;color:#0f172a;max-width:920px;}}
+h1{{font-size:22px;margin:0 0 6px;}} h2{{font-size:16px;margin:18px 0 6px;}} h3{{font-size:14px;margin:14px 0 4px;color:#334155;}}
+p{{margin:6px 0;}} table{{border-collapse:collapse;width:100%;background:#fff;margin:8px 0;}}
+th,td{{padding:6px 10px;border-bottom:1px solid #e2e8f0;text-align:left;font-size:13px;}}
+th{{background:#f1f5f9;color:#475569;font-weight:600;}}
+ul{{padding-left:22px;}} li{{margin:2px 0;}} code{{background:#f1f5f9;padding:1px 4px;border-radius:3px;font-size:12px;}}</style>
+</head><body>{body}</body></html>"""
